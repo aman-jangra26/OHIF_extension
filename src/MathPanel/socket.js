@@ -11,6 +11,7 @@ const socket: Socket = io(URL, {
   autoConnect: false,
 });
 
+
 socket.on('connect', () => {
   console.log('[socket] connected', socket.id);
 });
@@ -20,10 +21,5 @@ socket.on('connect_error', (err) => {
 socket.on('disconnect', (reason) => {
   console.log('[socket] disconnected', reason);
 });
-
-// The chat and user list events will be handled in your MathPanel component
-// Example:
-// socket.on('update-users', users => { setUsers(users) });
-// socket.on('chat-message', msg => { setMessages(old => [...old, msg]) });
 
 export default socket;

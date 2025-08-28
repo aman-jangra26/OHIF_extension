@@ -61,6 +61,8 @@ export default function MathPanel({ servicesManager }: Props) {
 
   const generateSessionId = () => `med-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
 
+  // Example emit when a display set is selected
+
   // Auto-scroll chat
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -228,6 +230,29 @@ export default function MathPanel({ servicesManager }: Props) {
     }
   }, [username, segmentationService]);
 
+  // Store only host segmentation updates
+  const [hostSegmentationUpdates, setHostSegmentationUpdates] = useState<any[]>([]);
+
+  const saveHostSegmentationUpdate = (segmentation: any) => {
+    if (segmentation.updatedByHost) {
+      const withTimestamp = { ...segmentation, timestamp: Date.now() };
+
+      setHostSegmentationUpdates(prev => {
+        const existingIndex = prev.findIndex(s => s.segId === withTimestamp.segId);
+        let updated;
+        if (existingIndex !== -1) {
+          updated = [...prev];
+          updated[existingIndex] = withTimestamp; // replace old with new
+        } else {
+          updated = [...prev, withTimestamp];
+        }
+
+        console.log('[frontend] Host segmentation updates:', updated);
+        return updated;
+      });
+    }
+  };
+
   const joinSession = useCallback(
     async (idToJoin: string) => {
       setError('');
@@ -368,6 +393,9 @@ export default function MathPanel({ servicesManager }: Props) {
         createSession={createSession}
         joinSession={joinSession}
         leaveSession={leaveSession}
+        servicesManager={servicesManager}
+        sessionId={''}
+        username={''}
       />
 
       {isConnected && (
@@ -413,56 +441,6 @@ export default function MathPanel({ servicesManager }: Props) {
                 </li>
               ))}
             </ul>
-          </div>
-
-          <h3
-            style={{
-              margin: '12px 0 8px',
-              fontSize: '1rem',
-              borderBottom: '1px solid #444',
-              paddingBottom: 4,
-            }}
-          >
-            💬 Chat
-          </h3>
-
-          <ChatBox messages={messages} sendMessage={sendMessage} />
-
-          {/* Also keep the inline single-line input (optional) */}
-          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-            <input
-              type="text"
-              placeholder="Type a message..."
-              value={chatInput}
-              onChange={e => setChatInput(e.target.value)}
-              onKeyDown={handleChatKeyDown}
-              style={{
-                flex: 1,
-                padding: '8px 10px',
-                borderRadius: 20,
-                border: '1px solid #555',
-                background: '#111',
-                color: '#fff',
-                outline: 'none',
-                fontSize: 13,
-              }}
-            />
-            <button
-              onClick={() => sendMessage()}
-              style={{
-                background: '#2196f3',
-                color: '#fff',
-                padding: '8px 14px',
-                border: 'none',
-                borderRadius: 20,
-                cursor: chatInput.trim() ? 'pointer' : 'not-allowed',
-                opacity: chatInput.trim() ? 1 : 0.6,
-                fontWeight: 'bold',
-              }}
-              disabled={!chatInput.trim()}
-            >
-              ➤
-            </button>
           </div>
         </>
       )}

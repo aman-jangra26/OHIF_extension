@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import socket from './socket';
-import { string } from 'prop-types';
 
 type Props = {
   isConnected: boolean;
@@ -56,10 +55,10 @@ export default function SessionControls({
   const [servicesReady, setServicesReady] = useState(false);
   const appliedSegmentations = useRef<Set<string>>(new Set());
   const socketId = useRef<string | null>(null);
-  const viewportId = string;
   const isHost = useRef(false);
   const eventOriginCache = useRef<Map<string, string>>(new Map());
   const labelmapBufferCache = useRef<Map<string, ArrayBuffer>>(new Map());
+  const brushEventListenersAdded = useRef(false);
 
   // Get services from servicesManager
   const getServices = () => {
@@ -89,14 +88,14 @@ export default function SessionControls({
   useEffect(() => {
     const handleConnect = () => {
       socketId.current = socket.id;
-      console.log('Our socket ID:', socketId.current, 'Viewport ID:');
+      console.log('✅ Connected with socket ID:', socketId.current);
     };
 
     socket.on('connect', handleConnect);
 
     if (socket.connected) {
       socketId.current = socket.id;
-      console.log('Already connected, socket ID:', socketId.current, 'Viewport ID:', viewportId);
+      console.log('✅ Already connected, socket ID:', socketId.current);
     }
 
     return () => {
@@ -116,7 +115,7 @@ export default function SessionControls({
           services.viewportGridService
         ) {
           setServicesReady(true);
-          console.log('✅ All services are ready');
+          console.log('✅ All OHIF services are ready');
           return true;
         }
         return false;
@@ -140,66 +139,91 @@ export default function SessionControls({
   useEffect(() => {
     if (isConnected && sessionId) {
       isHost.current = true;
-      console.log('🏠 I am the host');
+      console.log('🏠 I am the HOST of session:', sessionId);
     } else {
       isHost.current = false;
-      console.log('👤 I am a joiner');
+      console.log('👤 I am a JOINER');
     }
   }, [isConnected, sessionId]);
 
+  // Get the active viewport ID using OHIF API
   const getActiveViewportId = () => {
     const services = getServices();
-    if (!services?.viewportGridService) return viewportId;
+    if (!services?.viewportGridService) {
+      console.log('❌ Viewport grid service not available');
+      return null;
+    }
 
-    const activeViewportId = services.viewportGridService.getActiveViewportId();
-    console.log(activeViewportId);
-    return activeViewportId || viewportId;
+    try {
+      const activeViewportId = services.viewportGridService.getActiveViewportId();
+      console.log('📋 Active viewport ID:', activeViewportId);
+      return activeViewportId;
+    } catch (error) {
+      console.error('❌ Error getting active viewport ID:', error);
+      return null;
+    }
   };
 
+  // Get display set for the active viewport using OHIF API
   const getViewportDisplaySet = () => {
     const currentViewportId = getActiveViewportId();
     const services = getServices();
 
+    if (!currentViewportId) {
+      console.warn('⚠️ No active viewport ID available');
+      return null;
+    }
+
     if (!services?.viewportGridService || !services?.displaySetService) {
-      console.warn('Viewport grid or display set service not available');
+      console.warn('⚠️ Viewport grid or display set service not available');
       return null;
     }
 
-    const gridState = services.viewportGridService.getState();
-    const viewportData = gridState.viewports.get(currentViewportId);
+    try {
+      const gridState = services.viewportGridService.getState();
+      const viewportData = gridState.viewports.get(currentViewportId);
 
-    if (!viewportData) {
-      console.warn('No viewport data found for viewport:', currentViewportId);
+      if (!viewportData) {
+        console.warn('⚠️ No viewport data found for viewport:', currentViewportId);
+        return null;
+      }
+
+      const dsUID = viewportData.displaySetInstanceUIDs?.[0] || viewportData.displaySetInstanceUID;
+
+      if (!dsUID) {
+        console.warn('⚠️ No display set in active viewport:', currentViewportId);
+        return null;
+      }
+
+      const ds = services.displaySetService.getDisplaySetByUID(dsUID);
+      if (!ds) {
+        console.warn('⚠️ Display set not found:', dsUID);
+        return null;
+      }
+
+      console.log('📋 Viewport display set:', { viewportId: currentViewportId, displaySet: ds.displaySetInstanceUID });
+      return { viewportId: currentViewportId, ds };
+    } catch (error) {
+      console.error('❌ Error getting viewport display set:', error);
       return null;
     }
-
-    const dsUID = viewportData.displaySetInstanceUIDs?.[0] || viewportData.displaySetInstanceUID;
-
-    if (!dsUID) {
-      console.warn('No display set in active viewport:', currentViewportId);
-      return null;
-    }
-
-    const ds = services.displaySetService.getDisplaySetByUID(dsUID);
-    if (!ds) {
-      console.warn('Display set not found:', dsUID);
-      return null;
-    }
-
-    return { viewportId: currentViewportId, ds };
   };
 
-  // ------------------ Host: Forward Segmentation Events ------------------
+  // ==================== HOST LOGIC ====================
   useEffect(() => {
-    if (!servicesManager || !servicesReady) return;
+    if (!servicesManager || !servicesReady || !isHost.current) return;
+
+    console.log('🏠 Initializing HOST segmentation event forwarding');
 
     const services = getServices();
     if (
       !services?.segmentationService ||
       !services?.viewportGridService ||
       !services?.displaySetService
-    )
+    ) {
+      console.log('❌ Host services not available');
       return;
+    }
 
     // Get segmentation data for transmission
     const getSegmentationPayload = (segmentationId: string): SegmentationEvent | null => {
@@ -224,6 +248,9 @@ export default function SessionControls({
         // Get the current display set for the active viewport
         const viewportInfo = getViewportDisplaySet();
         const displaySetInstanceUID = viewportInfo?.ds?.displaySetInstanceUID;
+        const viewportId = viewportInfo?.viewportId;
+
+        console.log('📤 [HOST] Preparing segmentation payload from viewport:', viewportId);
 
         return {
           segmentationId: seg.segmentationId,
@@ -235,7 +262,7 @@ export default function SessionControls({
           displaySetInstanceUID,
         };
       } catch (error) {
-        console.error('Error getting segmentation payload:', error);
+        console.error('❌ Error getting segmentation payload:', error);
         return null;
       }
     };
@@ -253,10 +280,18 @@ export default function SessionControls({
 
         if (!segmentationId) return;
 
+        // Check if we originated this event to prevent feedback loops
+        const eventOrigin = eventOriginCache.current.get(segmentationId);
+        if (eventOrigin === socketId.current) {
+          console.log('🛑 [HOST] Skipping event that originated from us');
+          eventOriginCache.current.delete(segmentationId);
+          return;
+        }
+
         const payload = getSegmentationPayload(segmentationId);
         if (!payload) return;
 
-        console.log(`📤 [Host] Forwarding ${eventName} to joiners`, payload);
+        console.log(`📤 [HOST] Forwarding ${eventName} to joiners`, payload);
 
         // Cache that we're the origin of this event
         eventOriginCache.current.set(segmentationId, socketId.current!);
@@ -269,7 +304,7 @@ export default function SessionControls({
           },
         });
       } catch (error) {
-        console.error('Error forwarding segmentation event:', error);
+        console.error('❌ Error forwarding segmentation event:', error);
       }
     };
 
@@ -282,11 +317,10 @@ export default function SessionControls({
         const currentViewportId = getActiveViewportId();
         const viewportInfo = getViewportDisplaySet();
 
-        if (!operation || !points || !segmentIndex || !viewportInfo) return;
+        if (!operation || !points || !segmentIndex || !viewportInfo || !currentViewportId) return;
 
         // Get active segmentation
-        const activeSegmentation =
-          services.segmentationService.getActiveSegmentation(currentViewportId);
+        const activeSegmentation = services.segmentationService.getActiveSegmentation(currentViewportId);
 
         if (!activeSegmentation) return;
 
@@ -301,7 +335,7 @@ export default function SessionControls({
           displaySetInstanceUID: viewportInfo.ds.displaySetInstanceUID,
         };
 
-        console.log('📤 [Host] Forwarding brush event:', brushEventData);
+        console.log('📤 [HOST] Forwarding brush event:', brushEventData);
 
         // Send brush event to joiners
         socket.emit('brushEvent', {
@@ -315,7 +349,7 @@ export default function SessionControls({
           sendLabelmapData(activeSegmentation.segmentationId);
         }, 100);
       } catch (error) {
-        console.error('Error handling brush event:', error);
+        console.error('❌ Error handling brush event:', error);
       }
     };
 
@@ -332,7 +366,7 @@ export default function SessionControls({
         // Convert to ArrayBuffer for efficient transmission
         const buffer = labelmapData.buffer;
 
-        console.log(`📤 [Host] Sending labelmap data for ${segmentationId}`, buffer.byteLength);
+        console.log(`📤 [HOST] Sending labelmap data for ${segmentationId}`, buffer.byteLength);
 
         socket.emit('labelmapData', {
           segmentationId,
@@ -341,7 +375,7 @@ export default function SessionControls({
           fromHost: true,
         });
       } catch (error) {
-        console.error('Error sending labelmap data:', error);
+        console.error('❌ Error sending labelmap data:', error);
       }
     };
 
@@ -360,6 +394,14 @@ export default function SessionControls({
         (evt: any) => {
           const segmentationId = evt.segmentation?.segmentationId || evt.segmentationId;
           if (segmentationId) {
+            // Check if we originated this event to prevent feedback loops
+            const eventOrigin = eventOriginCache.current.get(segmentationId);
+            if (eventOrigin === socketId.current) {
+              console.log('🛑 [HOST] Skipping event that originated from us');
+              eventOriginCache.current.delete(segmentationId);
+              return;
+            }
+
             eventOriginCache.current.set(segmentationId, socketId.current!);
 
             socket.emit('segmentationEvent', {
@@ -367,7 +409,6 @@ export default function SessionControls({
               evt: {
                 type: 'segmentation_removed',
                 segmentationId,
-                targetViewportId: viewportId.current,
                 sourceSocketId: socketId.current,
                 fromHost: true,
               },
@@ -377,9 +418,13 @@ export default function SessionControls({
       ),
     ];
 
-    // Listen for brush events from the tool
-    document.addEventListener('cornerstoneimageloaded', handleBrushEvent);
-    document.addEventListener('cornerstonetoolsmodeentered', handleBrushEvent);
+    // Listen for brush events from the tool (only add once)
+    if (!brushEventListenersAdded.current) {
+      document.addEventListener('cornerstoneimageloaded', handleBrushEvent);
+      document.addEventListener('cornerstonetoolsmodeentered', handleBrushEvent);
+      brushEventListenersAdded.current = true;
+      console.log('🎯 [HOST] Added brush event listeners');
+    }
 
     // Handle request for all segmentations from joiners
     const handleRequestAllSegmentations = () => {
@@ -389,7 +434,7 @@ export default function SessionControls({
           .map(id => getSegmentationPayload(id))
           .filter(Boolean) as SegmentationEvent[];
 
-        console.log(`📤 [Host] Sending ${allSegmentations.length} segmentations to joiner`);
+        console.log(`📤 [HOST] Sending ${allSegmentations.length} segmentations to joiner`);
 
         const segmentationsWithHostFlag = allSegmentations.map(seg => ({
           ...seg,
@@ -403,58 +448,66 @@ export default function SessionControls({
           setTimeout(() => sendLabelmapData(id), 200);
         });
       } catch (error) {
-        console.error('Error sending all segmentations:', error);
+        console.error('❌ Error sending all segmentations:', error);
       }
     };
 
     socket.on('requestAllSegmentations', handleRequestAllSegmentations);
 
     return () => {
+      console.log('🧹 Cleaning up HOST event listeners');
       subs.forEach(unsubscribe => unsubscribe && unsubscribe());
-      document.removeEventListener('cornerstoneimageloaded', handleBrushEvent);
-      document.removeEventListener('cornerstonetoolsmodeentered', handleBrushEvent);
       socket.off('requestAllSegmentations', handleRequestAllSegmentations);
     };
-  }, [servicesManager, servicesReady]);
+  }, [servicesManager, servicesReady, isHost.current]);
 
-  // ------------------ Joiner: Handle Segmentation Events ------------------
+  // ==================== JOINER LOGIC ====================
   useEffect(() => {
-    if (!servicesManager || !servicesReady) return;
+    if (!servicesManager || !servicesReady || isHost.current) return;
+
+    console.log('👤 Initializing JOINER segmentation event handling');
 
     const services = getServices();
     if (
       !services?.segmentationService ||
       !services?.viewportGridService ||
       !services?.displaySetService
-    )
+    ) {
+      console.log('❌ Joiner services not available');
       return;
+    }
 
     const applySegmentation = async (evt: SegmentationEvent & { fromHost?: boolean }) => {
       try {
-        console.log('🖌️ [Joiner] Attempting to apply segmentation:', evt.segmentationId);
+        console.log('🖌️ [JOINER] Attempting to apply segmentation:', evt.segmentationId);
 
         // Check if we originated this event to prevent feedback loops
         const eventOrigin = eventOriginCache.current.get(evt.segmentationId);
         if (eventOrigin === socketId.current) {
-          console.log('🛑 [Joiner] Skipping event that originated from us');
+          console.log('🛑 [JOINER] Skipping event that originated from us');
           eventOriginCache.current.delete(evt.segmentationId);
           return;
         }
 
         // Skip if this event came from ourselves
         if (evt.sourceSocketId === socketId.current) {
-          console.log('🛑 [Joiner] Skipping own event');
+          console.log('🛑 [JOINER] Skipping own event');
           return;
         }
 
         if (appliedSegmentations.current.has(evt.segmentationId)) {
-          console.log('📝 [Joiner] Segmentation already applied:', evt.segmentationId);
-          return;
+          console.log('📝 [JOINER] Segmentation already applied, updating:', evt.segmentationId);
+          // Continue to update segments even if already applied
         }
 
         // Get the active viewport ID
-        const currentViewportId =
-          services.viewportGridService.getActiveViewportId() || viewportId.current;
+        const currentViewportId = getActiveViewportId();
+        if (!currentViewportId) {
+          console.warn('⚠️ [JOINER] No active viewport available');
+          return;
+        }
+
+        console.log('🎯 [JOINER] Applying segmentation to viewport:', currentViewportId);
 
         // Get or set the display set for this viewport
         let displaySet = null;
@@ -474,19 +527,17 @@ export default function SessionControls({
               displaySetInstanceUIDs: [displaySet.displaySetInstanceUID],
             });
           } else {
-            console.warn('⚠️ [Joiner] No display sets available');
+            console.warn('⚠️ [JOINER] No display sets available');
             return;
           }
         }
-
-        console.log('🎯 [Joiner] Applying segmentation to viewport:', currentViewportId);
 
         // Check if segmentation already exists
         let existingSeg = services.segmentationService.getSegmentation(evt.segmentationId);
 
         if (!existingSeg) {
           // Create new segmentation using the display set - OHIF 3.9 API
-          console.log('🆕 [Joiner] Creating new segmentation:', evt.segmentationId);
+          console.log('🆕 [JOINER] Creating new segmentation:', evt.segmentationId);
           try {
             // Use the new OHIF 3.9 API
             await services.segmentationService.createLabelmapForDisplaySet(displaySet, {
@@ -494,9 +545,9 @@ export default function SessionControls({
               label: evt.label || 'Remote Segmentation',
             });
             existingSeg = services.segmentationService.getSegmentation(evt.segmentationId);
-            console.log('✅ [Joiner] Segmentation created successfully');
+            console.log('✅ [JOINER] Segmentation created successfully');
           } catch (error) {
-            console.error('❌ [Joiner] Error creating segmentation:', error);
+            console.error('❌ [JOINER] Error creating segmentation:', error);
             // Fallback: try using commands manager
             try {
               if (services.commandsManager) {
@@ -508,10 +559,10 @@ export default function SessionControls({
                   },
                 });
                 existingSeg = services.segmentationService.getSegmentation(evt.segmentationId);
-                console.log('✅ [Joiner] Segmentation created via commands manager');
+                console.log('✅ [JOINER] Segmentation created via commands manager');
               }
             } catch (fallbackError) {
-              console.error('❌ [Joiner] Fallback also failed:', fallbackError);
+              console.error('❌ [JOINER] Fallback also failed:', fallbackError);
               return;
             }
           }
@@ -519,7 +570,7 @@ export default function SessionControls({
 
         // Apply segments configuration
         if (evt.segments) {
-          console.log('🎨 [Joiner] Applying segments configuration');
+          console.log('🎨 [JOINER] Applying segments configuration');
           for (const segment of Object.values(evt.segments)) {
             try {
               services.segmentationService.addSegment(evt.segmentationId, {
@@ -531,14 +582,14 @@ export default function SessionControls({
                 visibility: segment.visibility !== false,
               });
             } catch (error) {
-              console.log('ℹ️ [Joiner] Segment might already exist:', segment.segmentIndex);
+              console.log('ℹ️ [JOINER] Segment might already exist:', segment.segmentIndex);
             }
           }
         }
 
         // Add segmentation representation to viewport using OHIF 3.9 API
         try {
-          console.log('➕ [Joiner] Adding segmentation representation to viewport');
+          console.log('➕ [JOINER] Adding segmentation representation to viewport');
 
           // Use the new OHIF 3.9 API
           await services.segmentationService.addSegmentationRepresentation(currentViewportId, {
@@ -577,13 +628,13 @@ export default function SessionControls({
             }
           }
         } catch (error) {
-          console.warn('⚠️ [Joiner] Could not add segmentation representation to viewport:', error);
+          console.warn('⚠️ [JOINER] Could not add segmentation representation to viewport:', error);
         }
 
         appliedSegmentations.current.add(evt.segmentationId);
-        console.log('🎉 [Joiner] Segmentation applied successfully:', evt.segmentationId);
+        console.log('🎉 [JOINER] Segmentation applied successfully:', evt.segmentationId);
       } catch (error) {
-        console.error('❌ [Joiner] Error applying segmentation:', error);
+        console.error('❌ [JOINER] Error applying segmentation:', error);
       }
     };
 
@@ -592,14 +643,14 @@ export default function SessionControls({
         // Check if we originated this event to prevent feedback loops
         const eventOrigin = eventOriginCache.current.get(evt.segmentationId);
         if (eventOrigin === socketId.current) {
-          console.log('🛑 [Joiner] Skipping removal event that originated from us');
+          console.log('🛑 [JOINER] Skipping removal event that originated from us');
           eventOriginCache.current.delete(evt.segmentationId);
           return;
         }
 
         // Skip if this event came from ourselves
         if (evt.sourceSocketId === socketId.current) {
-          console.log('🛑 [Joiner] Skipping own removal event');
+          console.log('🛑 [JOINER] Skipping own removal event');
           return;
         }
 
@@ -607,9 +658,9 @@ export default function SessionControls({
         services.segmentationService.removeSegmentation(evt.segmentationId);
         appliedSegmentations.current.delete(evt.segmentationId);
         labelmapBufferCache.current.delete(evt.segmentationId);
-        console.log('🗑️ [Joiner] Segmentation removed:', evt.segmentationId);
+        console.log('🗑️ [JOINER] Segmentation removed:', evt.segmentationId);
       } catch (error) {
-        console.error('❌ [Joiner] Error removing segmentation:', error);
+        console.error('❌ [JOINER] Error removing segmentation:', error);
       }
     };
 
@@ -617,7 +668,7 @@ export default function SessionControls({
       eventName: string;
       evt: SegmentationEvent & { fromHost?: boolean };
     }) => {
-      console.log('📥 [Joiner] Received segmentation event:', data.eventName, data.evt);
+      console.log('📥 [JOINER] Received segmentation event:', data.eventName, data.evt);
 
       const evt = data.evt;
 
@@ -631,14 +682,14 @@ export default function SessionControls({
           removeSegmentation(evt);
           break;
         default:
-          console.log('❓ [Joiner] Unknown event type:', data.eventName);
+          console.log('❓ [JOINER] Unknown event type:', data.eventName);
       }
     };
 
     const handleAllSegmentations = (
       segmentations: (SegmentationEvent & { fromHost?: boolean })[]
     ) => {
-      console.log('📦 [Joiner] Received all segmentations:', segmentations.length);
+      console.log('📦 [JOINER] Received all segmentations:', segmentations.length);
       segmentations.forEach(applySegmentation);
     };
 
@@ -649,23 +700,23 @@ export default function SessionControls({
       try {
         // Skip if this event came from ourselves
         if (data.sourceSocketId === socketId.current) {
-          console.log('🛑 [Joiner] Skipping own brush event');
+          console.log('🛑 [JOINER] Skipping own brush event');
           return;
         }
 
-        console.log('🖌️ [Joiner] Received brush event:', data);
+        console.log('🖌️ [JOINER] Received brush event:', data);
 
         // Get or create the segmentation
         let segmentation = services.segmentationService.getSegmentation(data.segmentationId);
         if (!segmentation) {
-          console.log('🆕 [Joiner] Creating segmentation from brush event:', data.segmentationId);
+          console.log('🆕 [JOINER] Creating segmentation from brush event:', data.segmentationId);
 
           // Get display set
           const displaySet = services.displaySetService.getDisplaySetByUID(
             data.displaySetInstanceUID
           );
           if (!displaySet) {
-            console.warn('⚠️ [Joiner] Display set not found for brush event');
+            console.warn('⚠️ [JOINER] Display set not found for brush event');
             return;
           }
 
@@ -705,12 +756,12 @@ export default function SessionControls({
             toolName: data.toolName,
           });
 
-          console.log('✅ [Joiner] Brush operation applied successfully');
+          console.log('✅ [JOINER] Brush operation applied successfully');
         } catch (error) {
-          console.error('❌ [Joiner] Error applying brush operation:', error);
+          console.error('❌ [JOINER] Error applying brush operation:', error);
         }
       } catch (error) {
-        console.error('❌ [Joiner] Error handling brush event:', error);
+        console.error('❌ [JOINER] Error handling brush event:', error);
       }
     };
 
@@ -724,12 +775,12 @@ export default function SessionControls({
       try {
         // Skip if this event came from ourselves
         if (data.sourceSocketId === socketId.current) {
-          console.log('🛑 [Joiner] Skipping own labelmap data');
+          console.log('🛑 [JOINER] Skipping own labelmap data');
           return;
         }
 
         console.log(
-          '📊 [Joiner] Received labelmap data:',
+          '📊 [JOINER] Received labelmap data:',
           data.segmentationId,
           data.buffer.byteLength
         );
@@ -740,7 +791,7 @@ export default function SessionControls({
         // Check if we have the segmentation
         const segmentation = services.segmentationService.getSegmentation(data.segmentationId);
         if (!segmentation) {
-          console.log('⏳ [Joiner] Segmentation not yet available, caching labelmap data');
+          console.log('⏳ [JOINER] Segmentation not yet available, caching labelmap data');
           return;
         }
 
@@ -748,12 +799,12 @@ export default function SessionControls({
         try {
           await services.segmentationService.setLabelmapData(data.segmentationId, data.buffer);
 
-          console.log('✅ [Joiner] Labelmap data applied successfully');
+          console.log('✅ [JOINER] Labelmap data applied successfully');
         } catch (error) {
-          console.error('❌ [Joiner] Error applying labelmap data:', error);
+          console.error('❌ [JOINER] Error applying labelmap data:', error);
         }
       } catch (error) {
-        console.error('❌ [Joiner] Error handling labelmap data:', error);
+        console.error('❌ [JOINER] Error handling labelmap data:', error);
       }
     };
 
@@ -761,7 +812,7 @@ export default function SessionControls({
     if (isConnected && !isHost.current) {
       const hasSegmentations = services.segmentationService.getSegmentationIds?.()?.length > 0;
       if (!hasSegmentations) {
-        console.log('📞 [Joiner] Requesting all segmentations from host');
+        console.log('📞 [JOINER] Requesting all segmentations from host');
         socket.emit('requestAllSegmentations');
       }
     }
@@ -772,12 +823,13 @@ export default function SessionControls({
     socket.on('labelmapData', handleLabelmapData);
 
     return () => {
+      console.log('🧹 Cleaning up JOINER event listeners');
       socket.off('segmentationEvent', handleSegmentationEvent);
       socket.off('allSegmentations', handleAllSegmentations);
       socket.off('brushEvent', handleBrushEvent);
       socket.off('labelmapData', handleLabelmapData);
     };
-  }, [servicesManager, servicesReady, isConnected]);
+  }, [servicesManager, servicesReady, isConnected, isHost.current]);
 
   // ------------------ UI ------------------
   return (
